@@ -244,6 +244,48 @@ func (s *TaskSpec) WorkspacePaths() []string {
 	return paths
 }
 
+// Budgets.
+
+// Condition reasons reported when a task exhausts its budget.
+const (
+	// ReasonDeadlineExceeded is the Ready condition reason for a task that ran
+	// past spec.budget.activeDeadline.
+	ReasonDeadlineExceeded = "DeadlineExceeded"
+)
+
+// ActiveDeadline returns the parsed spec.budget.activeDeadline. It returns 0
+// and no error when no deadline is set.
+func (s *TaskSpec) ActiveDeadline() (time.Duration, error) {
+	raw := s.GetBudget().GetActiveDeadline()
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("spec.budget.activeDeadline: %q is not a duration such as \"30m\" or \"2h\"", raw)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("spec.budget.activeDeadline: %q must be positive", raw)
+	}
+	return d, nil
+}
+
+// ActiveTime returns how long the task has spent Running as of now: the time
+// accumulated by completed runs plus, if a run is in progress, the time since
+// it started.
+func (s *TaskStatus) ActiveTime(now time.Time) time.Duration {
+	if s == nil {
+		return 0
+	}
+	total := s.GetActiveDuration().AsDuration()
+	if since := s.GetRunningSince(); since != nil {
+		if d := now.Sub(since.AsTime()); d > 0 {
+			total += d
+		}
+	}
+	return total
+}
+
 // Resource names.
 //
 // A resource's name and atespace become Substrate resource names (the task's
@@ -339,6 +381,9 @@ func ValidateTask(t *Task) error {
 			return fmt.Errorf("%s: path %q is already used by workspace %q", field, paths[i], other)
 		}
 		seen[p] = r.GetName()
+	}
+	if _, err := spec.ActiveDeadline(); err != nil {
+		return err
 	}
 	return nil
 }

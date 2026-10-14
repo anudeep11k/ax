@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/ax/pkg/apis/v1alpha1"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"gopkg.in/yaml.v3"
@@ -46,12 +47,15 @@ func fullTask() *v1alpha1.Task {
 			},
 			Workspaces: []*v1alpha1.WorkspaceRef{{Name: "ws", Path: "/workspace", Goal: "build"}},
 			Debug:      true,
+			Budget:     &v1alpha1.TaskBudget{ActiveDeadline: "2h"},
 		},
 		Status: &v1alpha1.TaskStatus{
-			Phase:    "Running",
-			Id:       "id-1",
-			Actor:    "actor-1",
-			WorkerIp: "10.0.0.5:80",
+			Phase:          "Running",
+			Id:             "id-1",
+			Actor:          "actor-1",
+			WorkerIp:       "10.0.0.5:80",
+			ActiveDuration: durationpb.New(90 * time.Second),
+			RunningSince:   timestamppb.New(time.Date(2026, 9, 19, 12, 4, 0, 0, time.UTC)),
 			Conditions: []*v1alpha1.Condition{{
 				Type:       "Ready",
 				Status:     "True",
@@ -487,6 +491,23 @@ func TestValidateTask(t *testing.T) {
 			spec:    &v1alpha1.TaskSpec{Workspaces: []*v1alpha1.WorkspaceRef{{Name: "a", Path: "rel"}}},
 			wantErr: "spec.workspaces[0]: path \"rel\" must be absolute",
 		},
+		{name: "active deadline", spec: &v1alpha1.TaskSpec{Budget: &v1alpha1.TaskBudget{ActiveDeadline: "1h30m"}}},
+		{name: "empty budget", spec: &v1alpha1.TaskSpec{Budget: &v1alpha1.TaskBudget{}}},
+		{
+			name:    "active deadline without unit",
+			spec:    &v1alpha1.TaskSpec{Budget: &v1alpha1.TaskBudget{ActiveDeadline: "30"}},
+			wantErr: `spec.budget.activeDeadline: "30" is not a duration`,
+		},
+		{
+			name:    "zero active deadline",
+			spec:    &v1alpha1.TaskSpec{Budget: &v1alpha1.TaskBudget{ActiveDeadline: "0s"}},
+			wantErr: `spec.budget.activeDeadline: "0s" must be positive`,
+		},
+		{
+			name:    "negative active deadline",
+			spec:    &v1alpha1.TaskSpec{Budget: &v1alpha1.TaskBudget{ActiveDeadline: "-5m"}},
+			wantErr: "must be positive",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -538,6 +559,86 @@ spec:
 	}
 	if !proto.Equal(&task, &back) {
 		t.Errorf("round trip changed the task:\n%s", out)
+	}
+}
+
+func TestTask_Budget_YAML(t *testing.T) {
+	taskYAML := `
+apiVersion: ax.io/v1alpha1
+kind: Task
+metadata:
+  name: bounded
+spec:
+  budget:
+    activeDeadline: 30m
+`
+	var task v1alpha1.Task
+	if err := yaml.Unmarshal([]byte(taskYAML), &task); err != nil {
+		t.Fatalf("unmarshaling task: %v", err)
+	}
+	d, err := task.Spec.ActiveDeadline()
+	if err != nil || d != 30*time.Minute {
+		t.Fatalf("ActiveDeadline() = %v, %v; want 30m", d, err)
+	}
+	out, err := yaml.Marshal(&task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "activeDeadline: 30m") {
+		t.Errorf("expected activeDeadline in output:\n%s", out)
+	}
+	var back v1alpha1.Task
+	if err := yaml.Unmarshal(out, &back); err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	if !proto.Equal(&task, &back) {
+		t.Errorf("round trip changed the task:\n%s", out)
+	}
+}
+
+func TestTaskSpec_ActiveDeadline_Unset(t *testing.T) {
+	var nilSpec *v1alpha1.TaskSpec
+	for _, spec := range []*v1alpha1.TaskSpec{nilSpec, {}, {Budget: &v1alpha1.TaskBudget{}}} {
+		if d, err := spec.ActiveDeadline(); d != 0 || err != nil {
+			t.Errorf("ActiveDeadline() on %v = %v, %v; want 0, nil", spec, d, err)
+		}
+	}
+}
+
+func TestTaskStatus_ActiveTime(t *testing.T) {
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		status *v1alpha1.TaskStatus
+		want   time.Duration
+	}{
+		{name: "nil status", want: 0},
+		{name: "never run", status: &v1alpha1.TaskStatus{}, want: 0},
+		{
+			name:   "suspended after earlier runs",
+			status: &v1alpha1.TaskStatus{ActiveDuration: durationpb.New(7 * time.Minute)},
+			want:   7 * time.Minute,
+		},
+		{
+			name: "running, adds the current run",
+			status: &v1alpha1.TaskStatus{
+				ActiveDuration: durationpb.New(7 * time.Minute),
+				RunningSince:   timestamppb.New(now.Add(-3 * time.Minute)),
+			},
+			want: 10 * time.Minute,
+		},
+		{
+			name:   "clock skew never subtracts time",
+			status: &v1alpha1.TaskStatus{RunningSince: timestamppb.New(now.Add(time.Minute))},
+			want:   0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.status.ActiveTime(now); got != tt.want {
+				t.Errorf("ActiveTime() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

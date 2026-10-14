@@ -31,6 +31,8 @@ import (
 	"github.com/google/ax/pkg/apis/v1alpha1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"gopkg.in/yaml.v3"
 )
 
@@ -376,6 +378,49 @@ func TestParseSSHArgs(t *testing.T) {
 			if task != tt.wantTask || help != tt.wantHelp || !reflect.DeepEqual(command, tt.wantCommand) {
 				t.Errorf("parseSSHArgs(%q) = (%q, %q, %v), want (%q, %q, %v)",
 					tt.args, task, command, help, tt.wantTask, tt.wantCommand, tt.wantHelp)
+			}
+		})
+	}
+}
+
+func TestFormatActiveTime(t *testing.T) {
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	running := func(banked, current time.Duration) *v1alpha1.TaskStatus {
+		return &v1alpha1.TaskStatus{
+			ActiveDuration: durationpb.New(banked),
+			RunningSince:   timestamppb.New(now.Add(-current)),
+		}
+	}
+	withDeadline := func(d string) *v1alpha1.TaskSpec {
+		return &v1alpha1.TaskSpec{Budget: &v1alpha1.TaskBudget{ActiveDeadline: d}}
+	}
+	tests := []struct {
+		name string
+		task *v1alpha1.Task
+		want string
+	}{
+		{name: "never run, no deadline", task: &v1alpha1.Task{}, want: ""},
+		{name: "running, no deadline", task: &v1alpha1.Task{Status: running(0, 90*time.Second)}, want: "1m30s"},
+		{
+			name: "never run, with deadline",
+			task: &v1alpha1.Task{Spec: withDeadline("30m")},
+			want: "0s of 30m0s deadline (30m0s left)",
+		},
+		{
+			name: "banked plus current run",
+			task: &v1alpha1.Task{Spec: withDeadline("1h"), Status: running(20*time.Minute, 5*time.Minute)},
+			want: "25m0s of 1h0m0s deadline (35m0s left)",
+		},
+		{
+			name: "past the deadline",
+			task: &v1alpha1.Task{Spec: withDeadline("10m"), Status: &v1alpha1.TaskStatus{ActiveDuration: durationpb.New(11 * time.Minute)}},
+			want: "11m0s of 10m0s deadline (0s left)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatActiveTime(tt.task, now); got != tt.want {
+				t.Errorf("formatActiveTime() = %q, want %q", got, tt.want)
 			}
 		})
 	}

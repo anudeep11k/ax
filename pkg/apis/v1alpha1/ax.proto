@@ -16,6 +16,7 @@ syntax = "proto3";
 
 package ax.v1alpha1;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
@@ -78,6 +79,18 @@ message TaskSpec {
   // debug enables the in-container guest services (process execution and file
   // access) that back `ax ssh`. Off by default.
   bool debug = 6;
+  // budget bounds how much the task may consume. Unset means unbounded.
+  TaskBudget budget = 7;
+}
+
+// TaskBudget holds the limits a task runs under.
+message TaskBudget {
+  // active_deadline caps how long the task may spend in the Running phase,
+  // summed across suspend/resume cycles. Time spent Suspended does not count.
+  // It is a Go duration string such as "30m" or "2h". When the limit is
+  // reached, the task is suspended and marked Failed with reason
+  // DeadlineExceeded, so its workspace is kept for inspection.
+  string active_deadline = 1;
 }
 
 message EnvVar {
@@ -109,6 +122,12 @@ message TaskStatus {
   // json_name keeps the established `workerIP` spelling in YAML and JSON.
   string worker_ip = 4 [json_name = "workerIP"];
   repeated Condition conditions = 7;
+  // active_duration is the Running time accumulated by completed runs. It does
+  // not include the current run; add the time since running_since for that.
+  google.protobuf.Duration active_duration = 8;
+  // running_since is when the current run started. It is unset whenever the
+  // task is not Running.
+  google.protobuf.Timestamp running_since = 9;
 }
 
 message Condition {

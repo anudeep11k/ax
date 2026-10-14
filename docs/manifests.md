@@ -33,7 +33,24 @@ spec:
       goal: "Install dependencies and run the test suite"   # Antigravity prepares the workspace to this goal on first run
 
   debug: true   # serve guest services inside the sandbox so `ax ssh` works; off by default
+
+  budget:
+    activeDeadline: 2h   # stop the task after 2h of Running time; unset means no limit
 ```
+
+### Bounding how long a task runs
+
+`spec.budget.activeDeadline` caps the time a task spends `Running`. It takes a Go duration such as `45m` or `2h`. The clock only runs while the task is `Running`, so time spent `Suspended` does not count, and it keeps its total across suspend/resume cycles.
+
+```yaml
+spec:
+  budget:
+    activeDeadline: 30m
+```
+
+When the total reaches the deadline, `ax-server` suspends the task and marks it `Failed`, with `Ready=False` and reason `DeadlineExceeded`. Suspending rather than deleting keeps the workspace, so you can still look at what the agent did. A task that has used its deadline cannot be resumed; delete it, or create a new task with a larger deadline.
+
+`ax describe task` shows the time used and what is left, and `status.activeDuration` and `status.runningSince` hold the raw accounting. The server checks deadlines every 10 seconds by default (`ax-server --budget-check-interval`), so a task can run up to that long past its deadline before it is stopped.
 
 ### Binding several workspaces
 

@@ -19,6 +19,8 @@ The unit is deliberately small. An agent is not one process that runs to complet
 
 Two transitions are worth knowing. Suspending a task sets `Ready` to False with reason `TaskSuspended`; resuming sets it back. Deleting a task tears down the sandbox on Agent Substrate and removes the record. `ax delete` blocks until that has completed.
 
+A task can also bound its own running time with `spec.budget.activeDeadline`. Once its total `Running` time reaches the deadline, the server suspends it and marks it `Failed` with `Ready` reason `DeadlineExceeded`, keeping the workspace. See [Bounding how long a task runs](manifests.md#bounding-how-long-a-task-runs).
+
 ## Workspace
 
 Getting an agent to the point where it can start working is tedious. Before the first useful action it needs its data sources in place, such as repositories cloned at the right revision or buckets mounted, the tools it is allowed to call, and the skills it should bring along. Every task that needs the same environment repeats that setup, and every agent framework reinvents it. A `Workspace` exists to make that work declarative and done once.

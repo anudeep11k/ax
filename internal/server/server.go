@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/ax/internal/lock"
 	"github.com/google/ax/internal/store"
@@ -42,6 +43,9 @@ type Reconciler interface {
 type Options struct {
 	Locker     lock.Locker
 	Reconciler Reconciler
+	// Now returns the current time. It defaults to time.Now; tests replace it
+	// to control active-time accounting.
+	Now func() time.Time
 }
 
 // Server provides the gRPC API for AX.
@@ -51,6 +55,7 @@ type Server struct {
 	locker     lock.Locker
 	reconciler Reconciler
 	grpcServer *grpc.Server
+	nowFn      func() time.Time
 }
 
 // NewServer creates a new AX API server.
@@ -69,10 +74,16 @@ func NewServer(s store.Store, opts ...Options) *Server {
 		locker:     locker,
 		reconciler: opt.Reconciler,
 		grpcServer: grpc.NewServer(),
+		nowFn:      opt.Now,
+	}
+	if srv.nowFn == nil {
+		srv.nowFn = time.Now
 	}
 	v1alpha1.RegisterAXServer(srv.grpcServer, srv)
 	return srv
 }
+
+func (s *Server) now() time.Time { return s.nowFn() }
 
 // GRPCServer returns the underlying gRPC server instance.
 func (s *Server) GRPCServer() *grpc.Server {
@@ -180,6 +191,10 @@ func (s *Server) CreateTask(ctx context.Context, req *v1alpha1.CreateTaskRequest
 		task.Status = &v1alpha1.TaskStatus{}
 	}
 	task.Status.Phase = "Suspended"
+	// Active time is accounted by the server only; a client cannot pre-spend
+	// or reset a task's budget through the status it submits.
+	task.Status.ActiveDuration = nil
+	task.Status.RunningSince = nil
 	if err := s.store.SaveTask(ctx, task); err != nil {
 		return nil, status.Errorf(codes.Internal, "saving task: %v", err)
 	}
@@ -296,6 +311,7 @@ func (s *Server) SuspendTask(ctx context.Context, req *v1alpha1.SuspendTaskReque
 	if task.Status == nil {
 		task.Status = &v1alpha1.TaskStatus{}
 	}
+	prev := cloneStatus(task.Status)
 	task.Status.Phase = "Suspended"
 
 	if s.reconciler != nil {
@@ -308,10 +324,12 @@ func (s *Server) SuspendTask(ctx context.Context, req *v1alpha1.SuspendTaskReque
 			return nil, status.Errorf(codes.Internal, "suspending task on substrate: %v", err)
 		}
 		task.Status = reconciled.Status
+		settleActiveClock(prev, task.Status, s.now())
 		if err := s.store.UpdateTaskStatus(ctx, atespace, taskName, task.Status); err != nil {
 			return nil, status.Errorf(codes.Internal, "updating task status: %v", err)
 		}
 	} else {
+		settleActiveClock(prev, task.Status, s.now())
 		if err := s.store.SaveTask(ctx, task); err != nil {
 			return nil, status.Errorf(codes.Internal, "suspending task: %v", err)
 		}
@@ -347,6 +365,12 @@ func (s *Server) ResumeTask(ctx context.Context, req *v1alpha1.ResumeTaskRequest
 	if task.Status == nil {
 		task.Status = &v1alpha1.TaskStatus{}
 	}
+	if over, deadline := budgetExhausted(task, s.now()); over {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"task %s/%s has used its active deadline of %s; delete it or create a new task with a larger spec.budget.activeDeadline",
+			atespace, taskName, deadline)
+	}
+	prev := cloneStatus(task.Status)
 	task.Status.Phase = "Running"
 
 	if s.reconciler != nil {
@@ -361,6 +385,7 @@ func (s *Server) ResumeTask(ctx context.Context, req *v1alpha1.ResumeTaskRequest
 			} else if task.Status.Phase != "Pending" {
 				task.Status.Phase = "Failed"
 			}
+			settleActiveClock(prev, task.Status, s.now())
 			_ = s.store.UpdateTaskStatus(ctx, atespace, taskName, task.Status)
 			if substrate.IsTransientError(err) {
 				return nil, status.Errorf(codes.Unavailable, "resuming task on substrate: %v", err)
@@ -368,10 +393,12 @@ func (s *Server) ResumeTask(ctx context.Context, req *v1alpha1.ResumeTaskRequest
 			return nil, status.Errorf(codes.Internal, "resuming task on substrate: %v", err)
 		}
 		task.Status = reconciled.Status
+		settleActiveClock(prev, task.Status, s.now())
 		if err := s.store.UpdateTaskStatus(ctx, atespace, taskName, task.Status); err != nil {
 			return nil, status.Errorf(codes.Internal, "updating task status: %v", err)
 		}
 	} else {
+		settleActiveClock(prev, task.Status, s.now())
 		if err := s.store.SaveTask(ctx, task); err != nil {
 			return nil, status.Errorf(codes.Internal, "resuming task: %v", err)
 		}

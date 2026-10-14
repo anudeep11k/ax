@@ -669,6 +669,9 @@ func runDescribe(serverURL, atespace string, args []string) error {
 	fmt.Printf("Phase:        %s\n", phase)
 	fmt.Printf("Actor:        %s\n", actor)
 	fmt.Printf("Worker IP:    %s\n", workerIP)
+	if active := formatActiveTime(task, time.Now()); active != "" {
+		fmt.Printf("Active time:  %s\n", active)
+	}
 	if task.Spec != nil {
 		if refs := task.Spec.WorkspaceRefs(); len(refs) > 0 {
 			paths := task.Spec.WorkspacePaths()
@@ -700,6 +703,25 @@ func runDescribe(serverURL, atespace string, args []string) error {
 	}
 
 	return nil
+}
+
+// formatActiveTime renders how long a task has spent Running, against its
+// active deadline when it has one. It returns "" for a task that has never
+// run and has no deadline.
+func formatActiveTime(task *v1alpha1.Task, now time.Time) string {
+	used := task.GetStatus().ActiveTime(now).Round(time.Second)
+	deadline, err := task.GetSpec().ActiveDeadline()
+	if err != nil || deadline <= 0 {
+		if used == 0 {
+			return ""
+		}
+		return used.String()
+	}
+	remaining := deadline - used
+	if remaining < 0 {
+		remaining = 0
+	}
+	return fmt.Sprintf("%s of %s deadline (%s left)", used, deadline, remaining.Round(time.Second))
 }
 
 func runWatch(serverURL, atespace string, args []string) error {
